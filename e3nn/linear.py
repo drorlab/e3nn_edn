@@ -19,14 +19,17 @@ class KernelLinear(torch.nn.Module):
         self.Rs_out = rs.simplify(Rs_out)
 
         n_path = 0
+        n_out = 0
 
         for mul_out, l_out, p_out in self.Rs_out:
             for mul_in, l_in, p_in in self.Rs_in:
                 if (l_out, p_out) == (l_in, p_in):
                     # compute the number of degrees of freedom
                     n_path += mul_out * mul_in
+                    n_out += mul_out
 
         self.weight = torch.nn.Parameter(torch.randn(n_path))
+        self.bias = torch.nn.Parameter(torch.randn(n_out))
 
     def forward(self):
         """
@@ -55,8 +58,6 @@ class KernelLinear(torch.nn.Module):
                     kernel[s_out, s_in] = torch.einsum('uv,ij->uivj', weight, eye).reshape(mul_out * (2 * l_out + 1), mul_in * (2 * l_in + 1))
                     n_path += mul_in
 
-            if n_path > 0:
-                kernel[s_out] /= math.sqrt(n_path)
 
         return kernel
 
@@ -106,4 +107,8 @@ class Linear(torch.nn.Module):
 
         output = torch.einsum('ij,zj->zi', self.kernel(), features)
 
-        return output.reshape(*size, -1)
+        if self.Rs_out[0][1] == 0:
+            return output.reshape(*size, -1) + self.kernel.bias
+        else:
+            return output.reshape(*size, -1)
+

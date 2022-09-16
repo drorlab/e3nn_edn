@@ -27,10 +27,15 @@ class Convolution(tg.nn.MessagePassing):
 
     def message(self, x_j, k, groups):
         N = x_j.shape[0]
-        cout, cin = k.shape[-2:]
-        x_j = x_j.view(N, groups, cin)  # Rs_tp1
+        cout, m = k.shape[-2:]
+        x_j = x_j.view(N, cout, -1)  # Rs_tp1
+        m_input = x_j.shape[-1]
+        m_out = int(m / m_input)
+        k = k.view(N, cout, m_out, m_input)
         if k.shape[0] == 0:  # https://github.com/pytorch/pytorch/issues/37628
-            return torch.zeros(0, groups * cout)
-        if k.dim() == 4 and k.shape[1] == groups:  # kernel has group dimension
-           return torch.einsum('egij,egj->egi', k, x_j).reshape(N, groups * cout)
-        return torch.einsum('eij,egj->egi', k, x_j).reshape(N, groups * cout)
+            return torch.zeros(0, cout * m_out)
+#        if k.dim() == 4 and k.shape[1] == groups:  # kernel has group dimension
+#           return torch.einsum('egij,egj->egi', k, x_j).reshape(N, groups * cout)
+        # g: c_out, i: m_input, j: m_output
+        return torch.einsum('egij,egj->egi', k, x_j).reshape(N, cout * m_out)
+

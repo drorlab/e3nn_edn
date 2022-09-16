@@ -2,6 +2,7 @@
 import math
 
 import torch
+import numpy as np
 
 from e3nn import o3, rs, rsh
 from e3nn.linear import KernelLinear
@@ -69,7 +70,7 @@ class Kernel(torch.nn.Module):
                     assert all(p_in * (-1) ** l == p_out for l in l_filters), "selection_rule must return l's compatible with SH parity"
 
                 # compute the number of degrees of freedom
-                n_path += mul_out * mul_in * len(l_filters)
+                n_path += mul_out
 
                 # create the set of all spherical harmonics orders needed
                 set_of_l_filters = set_of_l_filters.union(l_filters)
@@ -78,6 +79,7 @@ class Kernel(torch.nn.Module):
         # it contains the learned parameters
         self.R = RadialModel(n_path)
         self.set_of_l_filters = sorted(set_of_l_filters)
+        assert len(self.set_of_l_filters) == 1
         self.register_buffer('norm_coef', norm_coef)
 
         self.linear = KernelLinear(self.Rs_in, self.Rs_out)
@@ -111,29 +113,22 @@ class Kernel(torch.nn.Module):
 
         radii = r.norm(2, dim=1)  # [batch]
 
-        # (1) Case r > 0
-
         # precompute all needed spherical harmonics
-        Y = rsh.spherical_harmonics_xyz(self.set_of_l_filters, r[radii > r_eps])  # [batch, l_filter * m_filter]
+        Y = rsh.spherical_harmonics_xyz(self.set_of_l_filters, r)  # [batch, l_filter * m_filter]
+        Y[radii == 0, :] = 0
 
+        radii = torch.clamp(radii, min=1e-4)
         # use the radial model to fix all the degrees of freedom
         # note: for the normalization we assume that the variance of R[i] is one
-        R = self.R(radii[radii > r_eps])  # [batch, l_out * l_in * mul_out * mul_in * l_filter]
+        R = self.R(radii)  # [batch, l_out * l_in * mul_out * mul_in * l_filter]
 
         if custom_backward:
             kernel1 = KernelFn.apply(Y, R, self.norm_coef, self.Rs_in, self.Rs_out, self.selection_rule, self.set_of_l_filters)
         else:
             kernel1 = kernel_fn_forward(Y, R, self.norm_coef, self.Rs_in, self.Rs_out, self.selection_rule, self.set_of_l_filters)
+        kernel1 = kernel1.reshape(*R.shape, -1)
 
-        # (2) Case r = 0
-
-        kernel2 = self.linear()
-
-        kernel = r.new_zeros(len(r), *kernel2.shape)
-        kernel[radii > r_eps] = kernel1
-        kernel[radii <= r_eps] = kernel2
-
-        return kernel.reshape(*size, *kernel2.shape)
+        return kernel1
 
 
 class GroupKernel(torch.nn.Module):
@@ -153,7 +148,8 @@ def kernel_fn_forward(Y, R, norm_coef, Rs_in, Rs_out, selection_rule, set_of_l_f
     :return: tensor [batch, l_out * mul_out * m_out, l_in * mul_in * m_in]
     """
     batch = Y.shape[0]
-    n_in = rs.dim(Rs_in)
+    assert len(Rs_in) == 1
+    n_in = Rs_in[0][1] * 2 + 1
     n_out = rs.dim(Rs_out)
 
     kernel = Y.new_zeros(batch, n_out, n_in)
@@ -168,7 +164,7 @@ def kernel_fn_forward(Y, R, norm_coef, Rs_in, Rs_out, selection_rule, set_of_l_f
 
         begin_in = 0
         for j, (mul_in, l_in, p_in) in enumerate(Rs_in):
-            s_in = slice(begin_in, begin_in + mul_in * (2 * l_in + 1))
+            s_in = slice(begin_in, begin_in + 1 * (2 * l_in + 1))
             begin_in += mul_in * (2 * l_in + 1)
 
             l_filters = selection_rule(l_in, p_in, l_out, p_out)
@@ -176,8 +172,8 @@ def kernel_fn_forward(Y, R, norm_coef, Rs_in, Rs_out, selection_rule, set_of_l_f
                 continue
 
             # extract the subset of the `R` that corresponds to the couple (l_out, l_in)
-            n = mul_out * mul_in * len(l_filters)
-            sub_R = R[:, begin_R: begin_R + n].reshape(batch, mul_out, mul_in, len(l_filters))  # [batch, mul_out, mul_in, l_filter]
+            n = mul_out * 1 * len(l_filters)
+            sub_R = R[:, begin_R: begin_R + n].reshape(batch, mul_out, 1, len(l_filters))  # [batch, mul_out, mul_in, l_filter]
             begin_R += n
 
             # note: I don't know if we can vectorize this for loop because [l_filter * m_filter] cannot be put into [l_filter, m_filter]
@@ -189,7 +185,7 @@ def kernel_fn_forward(Y, R, norm_coef, Rs_in, Rs_out, selection_rule, set_of_l_f
                 C = o3.wigner_3j(l_out, l_in, l_filter, cached=True, like=kernel)  # [m_out, m_in, m]
 
                 # note: The multiplication with `sub_R` could also be done outside of the for loop
-                K += norm_coef[i, j] * torch.einsum("ijk,zk,zuv->zuivj", (C, sub_Y, sub_R[..., k]))  # [batch, mul_out, m_out, mul_in, m_in]
+                K += torch.einsum("ijk,zk,zuv->zuivj", (C, sub_Y, sub_R[..., k]))  # [batch, mul_out, m_out, mul_in, m_in]
 
             if not isinstance(K, int):
                 kernel[:, s_out, s_in] = K.reshape_as(kernel[:, s_out, s_in])
@@ -273,3 +269,4 @@ class KernelFn(torch.autograd.Function):
 
         del ctx
         return grad_Y, grad_R, None, None, None, None, None
+

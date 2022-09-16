@@ -40,18 +40,23 @@ class FiniteElementModel(torch.nn.Module):
 
 
 class FC(torch.nn.Module):
+
     def __init__(self, d1, d2, h, L, act):
         super().__init__()
 
         weights = []
+        biases = []
 
         hh = d1
         for _ in range(L):
             weights.append(torch.nn.Parameter(torch.randn(h, hh)))
+            biases.append(torch.nn.Parameter(torch.randn(h)))
             hh = h
 
         weights.append(torch.nn.Parameter(torch.randn(d2, hh)))
+        biases.append(torch.nn.Parameter(torch.randn(d2)))
         self.weights = torch.nn.ParameterList(weights)
+        self.biases = torch.nn.ParameterList(biases)
         self.act = act
 
     def forward(self, x):
@@ -62,16 +67,16 @@ class FC(torch.nn.Module):
             h = x.size(1)
             return x @ (W.t() / h ** 0.5)
 
-        for i, W in enumerate(self.weights):
+        for i, (W, b) in enumerate(zip(self.weights, self.biases)):
             h = x.size(1)
 
             if i == 0:
                 # note: normalization assumes that the sum of the inputs is 1
-                x = self.act(x @ W.t())
+                x = self.act(x @ W.t() + b)
             elif i < L:
-                x = self.act(x @ (W.t() / h ** 0.5))
+                x = self.act(x @ W.t() + b)
             else:
-                x = x @ (W.t() / h ** 0.5)
+                x = x @ W.t() + b
 
         return x
 
@@ -98,12 +103,10 @@ def CosineBasisModel(out_dim, max_radius, number_of_basis, h, L, act):
 
 def GaussianRadialModel(out_dim, max_radius, number_of_basis, h, L, act, min_radius=0.):
     """exp(-x^2 /spacing)"""
-    spacing = (max_radius - min_radius) / (number_of_basis - 1)
     radii = torch.linspace(min_radius, max_radius, number_of_basis)
-    sigma = 0.8 * spacing
 
     def basis(x):
-        return x.div(sigma).pow(2).neg().exp().div(1.423085244900308)
+        return x.pow(2).neg().exp()
     return FiniteElementFCModel(out_dim, radii, basis, h, L, act)
 
 
@@ -134,3 +137,4 @@ class BesselRadialModel(torch.nn.Module):
     def forward(self, x):
         x = self.basis(x)
         return self.f(x)
+
